@@ -2,8 +2,9 @@ package s3
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
+	"crypto/sha256"
+	"fmt"
+	"golang.org/x/crypto/hkdf"
 	"io"
 	"io/ioutil"
 	"sort"
@@ -49,7 +50,10 @@ func (s *Client) UploadWithContext(ctx context.Context, object string, reader io
 	var err error
 	uploadReader := reader
 	if len(config.Get().S3.EncryptionKey) != 0 {
-		key := getKey(config.Get().S3.EncryptionKey)
+		key, err := deriveEncryptionKey(config.Get().S3.EncryptionKey, object)
+		if err != nil {
+			return fmt.Errorf("could not derive encryption key: %v", err)
+		}
 		uploadReader, err = sio.EncryptReader(reader, sio.Config{Key: key, CipherSuites: []byte{sio.AES_256_GCM}})
 		if err != nil {
 			log.Debugf("failed to encrypt reader: %v", err)
@@ -86,7 +90,10 @@ func (s *Client) DownloadWithContext(ctx context.Context, object string) (io.Rea
 	}
 
 	if len(config.Get().S3.EncryptionKey) > 0 {
-		key := getKey(config.Get().S3.EncryptionKey)
+		key, err := deriveEncryptionKey(config.Get().S3.EncryptionKey, object)
+		if err != nil {
+			return nil, fmt.Errorf("could not derive encryption key: %v", err)
+		}
 		decrypted, err := sio.DecryptReader(reader, sio.Config{Key: key, CipherSuites: []byte{sio.AES_256_GCM}})
 		if err != nil {
 			log.Debugf("failed to decrypt reader: %v", err)
@@ -105,8 +112,12 @@ func (s *Client) Delete(object string) error {
 	return nil
 }
 
-func getKey(password string) []byte {
-	hasher := md5.New()
-	hasher.Write([]byte(password))
-	return []byte(hex.EncodeToString(hasher.Sum(nil)))
+func deriveEncryptionKey(masterKey, filename string) ([]byte, error) {
+	hash := sha256.New
+	h := hkdf.New(hash, []byte(masterKey), []byte(filename), nil)
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(h, key); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
